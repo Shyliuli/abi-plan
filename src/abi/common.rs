@@ -136,11 +136,11 @@ pub fn aapcs64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
 }
 
 pub fn riscv64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
-    arm_like(AbiKind::Riscv64, sig)
+    riscv_like(AbiKind::Riscv64, sig)
 }
 
 pub fn loongarch64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
-    arm_like(AbiKind::LoongArch64, sig)
+    riscv_like(AbiKind::LoongArch64, sig)
 }
 
 fn aggregate_register_abi(
@@ -303,6 +303,7 @@ fn aggregate_register_abi(
             max_gpr: gpr_limit,
             max_fpr: fpr_limit,
             indirect_threshold: aggregate_limit,
+            byval_aggregates: true,
         };
         scalar_or_indirect(&mut plan, index, ty, &mut budget)?;
         gpr = budget.gpr;
@@ -373,12 +374,260 @@ fn arm_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError>
             max_gpr: 8,
             max_fpr: 8,
             indirect_threshold: 16,
+            byval_aggregates: false,
         };
         scalar_or_indirect(&mut plan, index, ty, &mut budget)?;
         gpr = budget.gpr;
         fpr = budget.fpr;
     }
     Ok(plan)
+}
+
+/// RISC-V and LoongArch flatten small aggregates field by field instead of
+/// classifying eightbytes: floating fields get their own FP register, integer
+/// fields share a register while they fit in one XLEN. An aggregate that does
+/// not fit is passed by reference.
+fn riscv_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
+    let mut plan = base(abi, sig);
+    let mut gpr = 0u16;
+    let mut fpr = 0u16;
+
+    if sig.ret.is_aggregate() {
+        match aggregate_parts(&sig.ret) {
+            Some(parts) if parts_fit(&parts, gpr, fpr, 2, 2) => {
+                let mut emitted = Vec::new();
+                for part in &parts {
+                    let index = if part.class == RegisterClass::Gpr {
+                        let i = gpr;
+                        gpr += 1;
+                        i
+                    } else {
+                        let i = fpr;
+                        fpr += 1;
+                        i
+                    };
+                    emitted.push(ValuePart {
+                        source_offset: part.offset,
+                        size: part.size,
+                        location: Location::Register(RegisterId {
+                            class: part.class,
+                            index,
+                        }),
+                    });
+                    add_register(
+                        &mut plan,
+                        RegisterId {
+                            class: part.class,
+                            index,
+                        },
+                        None,
+                    );
+                }
+                plan.return_value = ReturnPlan::Direct { parts: emitted };
+            }
+            _ => indirect_return(&mut plan, &sig.ret, 0),
+        }
+    } else if !sig.ret.is_void() {
+        let class = if sig.ret.is_float() {
+            RegisterClass::Fpr
+        } else {
+            RegisterClass::Gpr
+        };
+        direct_return(&mut plan, &sig.ret, class, 0);
+    }
+
+    for (index, ty) in sig.params.iter().enumerate() {
+        if ty.is_aggregate() {
+            match aggregate_parts(ty) {
+                Some(parts) if parts_fit(&parts, gpr, fpr, 8, 8) => {
+                    let mut emitted = Vec::new();
+                    for part in &parts {
+                        let (class, index_reg) = if part.class == RegisterClass::Gpr {
+                            let i = gpr;
+                            gpr += 1;
+                            (RegisterClass::Gpr, i)
+                        } else {
+                            let i = fpr;
+                            fpr += 1;
+                            (RegisterClass::Fpr, i)
+                        };
+                        emitted.push(ValuePart {
+                            source_offset: part.offset,
+                            size: part.size,
+                            location: Location::Register(RegisterId {
+                                class,
+                                index: index_reg,
+                            }),
+                        });
+                        add_register(
+                            &mut plan,
+                            RegisterId {
+                                class,
+                                index: index_reg,
+                            },
+                            Some((index, part.offset, part.size)),
+                        );
+                    }
+                    plan.args.push(ArgPlan {
+                        index,
+                        ty: ty.clone(),
+                        passing: Passing::Direct { parts: emitted },
+                    });
+                }
+                _ => {
+                    let location = if gpr < 8 {
+                        let location = Location::Register(RegisterId {
+                            class: RegisterClass::Gpr,
+                            index: gpr,
+                        });
+                        add_register(
+                            &mut plan,
+                            RegisterId {
+                                class: RegisterClass::Gpr,
+                                index: gpr,
+                            },
+                            Some((index, 0, pointer_size(abi))),
+                        );
+                        gpr += 1;
+                        location
+                    } else {
+                        add_stack(&mut plan, pointer_size(abi), 8, false)
+                    };
+                    plan.args.push(ArgPlan {
+                        index,
+                        ty: ty.clone(),
+                        passing: Passing::Indirect {
+                            pointer: location,
+                            size: ty.size(),
+                            align: ty.align(),
+                            byval: false,
+                        },
+                    });
+                }
+            }
+            continue;
+        }
+        let mut budget = RegisterBudget {
+            gpr,
+            fpr,
+            max_gpr: 8,
+            max_fpr: 8,
+            indirect_threshold: 16,
+            byval_aggregates: false,
+        };
+        scalar_or_indirect(&mut plan, index, ty, &mut budget)?;
+        gpr = budget.gpr;
+        fpr = budget.fpr;
+    }
+    Ok(plan)
+}
+
+fn pointer_size(abi: AbiKind) -> u32 {
+    (abi.data_layout().pointer_bits as u32) / 8
+}
+
+/// One register-sized piece of a flattened aggregate.
+struct Part {
+    offset: u32,
+    size: u32,
+    class: RegisterClass,
+}
+
+fn parts_fit(parts: &[Part], gpr: u16, fpr: u16, max_gpr: u16, max_fpr: u16) -> bool {
+    let need_g = parts
+        .iter()
+        .filter(|part| part.class == RegisterClass::Gpr)
+        .count() as u16;
+    let need_f = parts
+        .iter()
+        .filter(|part| part.class == RegisterClass::Fpr)
+        .count() as u16;
+    gpr + need_g <= max_gpr && fpr + need_f <= max_fpr
+}
+
+/// Flatten an aggregate into register pieces, or return `None` when it has to
+/// be passed by reference.
+fn aggregate_parts(ty: &AbiType) -> Option<Vec<Part>> {
+    if ty.size() > 16 {
+        return None;
+    }
+    // A homogeneous aggregate of one floating type keeps one register per
+    // element, which is exactly what the field walk below produces.
+    let mut leaves = Vec::new();
+    collect_leaves(ty, 0, &mut leaves)?;
+    if leaves.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<Part> = Vec::new();
+    // Integer fields share a register while they fit in one XLEN.
+    let mut pending: Option<Part> = None;
+    for leaf in leaves {
+        if leaf.class == RegisterClass::Fpr {
+            if let Some(pending) = pending.take() {
+                parts.push(pending);
+            }
+            parts.push(leaf);
+            continue;
+        }
+        match &mut pending {
+            Some(current)
+                if current.offset + current.size + leaf.size <= 8
+                    && leaf.offset == current.offset + current.size =>
+            {
+                current.size += leaf.size;
+            }
+            _ => {
+                if let Some(pending) = pending.take() {
+                    parts.push(pending);
+                }
+                pending = Some(leaf);
+            }
+        }
+    }
+    if let Some(pending) = pending {
+        parts.push(pending);
+    }
+    Some(parts)
+}
+
+fn collect_leaves(ty: &AbiType, base: u32, out: &mut Vec<Part>) -> Option<()> {
+    match ty {
+        AbiType::Float { .. } => out.push(Part {
+            offset: base,
+            size: ty.size(),
+            class: RegisterClass::Fpr,
+        }),
+        AbiType::Integer { .. } | AbiType::Pointer { .. } | AbiType::Bool => out.push(Part {
+            offset: base,
+            size: ty.size(),
+            class: RegisterClass::Gpr,
+        }),
+        AbiType::Array { element, count } => {
+            for index in 0..*count {
+                collect_leaves(element, base + index * element.size(), out)?;
+            }
+        }
+        AbiType::Struct { fields, .. } => {
+            for field in fields {
+                collect_leaves(&field.ty, base + field.offset, out)?;
+            }
+        }
+        // A union cannot be flattened: its members overlap.
+        AbiType::Union { fields, .. } => {
+            let all_float = fields.iter().all(|field| field.ty.is_float());
+            out.push(Part {
+                offset: base,
+                size: ty.size().min(8),
+                class: if all_float {
+                    RegisterClass::Fpr
+                } else {
+                    RegisterClass::Gpr
+                },
+            });
+        }
+        _ => return None,
+    }
+    Some(())
 }
 
 fn homogeneous_float_count(ty: &AbiType) -> Option<u32> {

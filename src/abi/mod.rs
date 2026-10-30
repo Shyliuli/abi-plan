@@ -114,6 +114,10 @@ pub(crate) struct RegisterBudget {
     pub max_gpr: u16,
     pub max_fpr: u16,
     pub indirect_threshold: u32,
+    /// SysV copies large aggregates into the callee's frame (`byval`), while
+    /// AArch64, RISC-V, and LoongArch pass a plain reference to the caller's
+    /// temporary. The flag records which convention the target uses.
+    pub byval_aggregates: bool,
 }
 
 pub(crate) fn scalar_or_indirect(
@@ -150,7 +154,7 @@ pub(crate) fn scalar_or_indirect(
                 pointer: loc,
                 size,
                 align: ty.align(),
-                byval: true,
+                byval: budget.byval_aggregates,
             },
         });
         return Ok(());
