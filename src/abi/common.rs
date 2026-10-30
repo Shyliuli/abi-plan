@@ -13,120 +13,96 @@ pub fn sysv64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
 pub fn windows_x64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
     let mut plan = base(AbiKind::WindowsX64, sig);
     plan.stack.shadow_bytes = 32;
-    let mut gpr = 0u16;
-    let mut fpr = 0u16;
+
+    // Win64 assigns *positions*, not two independent register files: the first
+    // four arguments take RCX/RDX/R8/R9 or XMM0..XMM3 by position, and the
+    // fifth argument goes on the stack no matter how few registers were used.
+    let mut position = 0u16;
     if sig.ret.is_aggregate() && sig.ret.size() > 8 {
         indirect_return(&mut plan, &sig.ret, 0);
-        gpr = 1;
+        position = 1;
     } else if !sig.ret.is_void() {
-        direct_return(
-            &mut plan,
-            &sig.ret,
-            if sig.ret.is_float() {
+        let class = if sig.ret.is_float() {
+            RegisterClass::Fpr
+        } else {
+            RegisterClass::Gpr
+        };
+        direct_return(&mut plan, &sig.ret, class, 0);
+    }
+
+    for (index, ty) in sig.params.iter().enumerate() {
+        let aggregate = ty.is_aggregate();
+        // Aggregates of 1, 2, 4, or 8 bytes travel by value in a register;
+        // every other aggregate is passed by reference.
+        let by_value = !aggregate || matches!(ty.size(), 1 | 2 | 4 | 8);
+        if position < 4 {
+            let class = if ty.is_float() {
                 RegisterClass::Fpr
             } else {
                 RegisterClass::Gpr
-            },
-            0,
-        );
-    }
-    for (index, ty) in sig.params.iter().enumerate() {
-        if ty.is_aggregate() && !matches!(ty.size(), 1 | 2 | 4 | 8) {
-            if gpr < 4 {
-                let loc = Location::Register(RegisterId {
-                    class: RegisterClass::Gpr,
-                    index: gpr,
-                });
-                add_register(
-                    &mut plan,
-                    RegisterId {
-                        class: RegisterClass::Gpr,
-                        index: gpr,
-                    },
-                    Some((index, 0, 8)),
-                );
-                gpr += 1;
-                plan.args.push(ArgPlan {
-                    index,
-                    ty: ty.clone(),
-                    passing: Passing::Indirect {
-                        pointer: loc,
-                        size: ty.size(),
-                        align: ty.align(),
-                        byval: true,
-                    },
-                });
-            } else {
-                let loc = add_stack(&mut plan, 8, 8, false);
-                plan.args.push(ArgPlan {
-                    index,
-                    ty: ty.clone(),
-                    passing: Passing::Indirect {
-                        pointer: loc,
-                        size: ty.size(),
-                        align: ty.align(),
-                        byval: true,
-                    },
-                });
-            }
-            continue;
-        }
-        if ty.is_float() && fpr < 4 {
-            let loc = Location::Register(RegisterId {
-                class: RegisterClass::Fpr,
-                index: fpr,
+            };
+            let location = Location::Register(RegisterId {
+                class,
+                index: position,
             });
             add_register(
                 &mut plan,
                 RegisterId {
-                    class: RegisterClass::Fpr,
-                    index: fpr,
-                },
-                Some((index, 0, ty.size())),
-            );
-            fpr += 1;
-            plan.args.push(ArgPlan {
-                index,
-                ty: ty.clone(),
-                passing: Passing::Direct {
-                    parts: scalar_parts(ty, loc, 0),
-                },
-            });
-        } else if gpr < 4 {
-            let loc = Location::Register(RegisterId {
-                class: RegisterClass::Gpr,
-                index: gpr,
-            });
-            add_register(
-                &mut plan,
-                RegisterId {
-                    class: RegisterClass::Gpr,
-                    index: gpr,
+                    class,
+                    index: position,
                 },
                 Some((index, 0, ty.size().min(8))),
             );
-            gpr += 1;
-            plan.args.push(ArgPlan {
-                index,
-                ty: ty.clone(),
-                passing: Passing::Direct {
-                    parts: scalar_parts(ty, loc, 0),
-                },
-            });
-        } else {
-            let loc = add_stack(&mut plan, align_up(ty.size().max(8), 8), 8, false);
-            plan.args.push(ArgPlan {
-                index,
-                ty: ty.clone(),
-                passing: Passing::Direct {
-                    parts: vec![ValuePart {
-                        source_offset: 0,
+            if !by_value {
+                plan.args.push(ArgPlan {
+                    index,
+                    ty: ty.clone(),
+                    passing: Passing::Indirect {
+                        pointer: location,
                         size: ty.size(),
-                        location: loc,
-                    }],
-                },
-            });
+                        align: ty.align(),
+                        byval: false,
+                    },
+                });
+            } else {
+                plan.args.push(ArgPlan {
+                    index,
+                    ty: ty.clone(),
+                    passing: Passing::Direct {
+                        parts: scalar_parts(ty, location, 0),
+                    },
+                });
+            }
+        } else {
+            // Stack slots are eight bytes for both a value and a pointer.
+            let size = align_up(ty.size().max(8), 8);
+            let location = add_stack(&mut plan, size, 8, false);
+            if !by_value {
+                plan.args.push(ArgPlan {
+                    index,
+                    ty: ty.clone(),
+                    passing: Passing::Indirect {
+                        pointer: location,
+                        size: ty.size(),
+                        align: ty.align(),
+                        byval: false,
+                    },
+                });
+            } else {
+                plan.args.push(ArgPlan {
+                    index,
+                    ty: ty.clone(),
+                    passing: Passing::Direct {
+                        parts: vec![ValuePart {
+                            source_offset: 0,
+                            size: ty.size(),
+                            location,
+                        }],
+                    },
+                });
+            }
         }
+        position += 1;
     }
     Ok(plan)
 }
