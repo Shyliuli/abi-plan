@@ -46,6 +46,9 @@ pub enum AbiKind {
     LoongArch64,
 }
 
+/// Public name for the target ABI selected by a caller.
+pub type TargetAbi = AbiKind;
+
 impl AbiKind {
     pub fn data_layout(self) -> DataLayout {
         match self {
