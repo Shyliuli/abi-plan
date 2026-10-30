@@ -295,6 +295,34 @@ fn arm_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError>
     if sig.ret.is_aggregate() && sig.ret.size() > 16 {
         indirect_return(&mut plan, &sig.ret, 0);
         gpr = 1;
+    } else if sig.ret.is_aggregate() {
+        // Without a homogeneous float aggregate, an aggregate return of up to
+        // two eightbytes comes back in one or two general registers.
+        // Without a homogeneous float aggregate, an aggregate return of up to
+        // two eightbytes comes back in one or two general registers.
+        let mut parts = Vec::new();
+        for word in 0..sig.ret.size().div_ceil(8) {
+            let offset = word * 8;
+            let size = sig.ret.size().saturating_sub(offset).min(8);
+            let location = Location::Register(RegisterId {
+                class: RegisterClass::Gpr,
+                index: word as u16,
+            });
+            parts.push(ValuePart {
+                source_offset: offset,
+                size,
+                location,
+            });
+            add_register(
+                &mut plan,
+                RegisterId {
+                    class: RegisterClass::Gpr,
+                    index: word as u16,
+                },
+                None,
+            );
+        }
+        plan.return_value = ReturnPlan::Direct { parts };
     } else if !sig.ret.is_void() {
         direct_return(
             &mut plan,
@@ -336,6 +364,36 @@ fn arm_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError>
                     location: loc,
                 });
                 fpr += 1;
+            }
+            plan.args.push(ArgPlan {
+                index,
+                ty: ty.clone(),
+                passing: Passing::Direct { parts },
+            });
+            continue;
+        }
+        if ty.is_aggregate() && ty.size() <= 16 && gpr + ty.size().div_ceil(8) as u16 <= 8 {
+            let mut parts = Vec::new();
+            for word in 0..ty.size().div_ceil(8) {
+                let offset = word * 8;
+                let size = ty.size().saturating_sub(offset).min(8);
+                parts.push(ValuePart {
+                    source_offset: offset,
+                    size,
+                    location: Location::Register(RegisterId {
+                        class: RegisterClass::Gpr,
+                        index: gpr,
+                    }),
+                });
+                add_register(
+                    &mut plan,
+                    RegisterId {
+                        class: RegisterClass::Gpr,
+                        index: gpr,
+                    },
+                    Some((index, offset, size)),
+                );
+                gpr += 1;
             }
             plan.args.push(ArgPlan {
                 index,

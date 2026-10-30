@@ -129,10 +129,18 @@ pub(crate) fn scalar_or_indirect(
     let size = ty.size();
     if ty.is_aggregate() && size > budget.indirect_threshold {
         if budget.gpr >= budget.max_gpr {
-            return Err(AbiError::TooManyArguments {
-                abi: plan.abi,
+            let location = add_stack(plan, 8, 8, false);
+            plan.args.push(ArgPlan {
                 index,
+                ty: ty.clone(),
+                passing: Passing::Indirect {
+                    pointer: location,
+                    size,
+                    align: ty.align(),
+                    byval: budget.byval_aggregates,
+                },
             });
+            return Ok(());
         }
         let loc = Location::Register(RegisterId {
             class: RegisterClass::Gpr,
@@ -161,10 +169,20 @@ pub(crate) fn scalar_or_indirect(
     }
     if ty.is_float() {
         if budget.fpr >= budget.max_fpr {
-            return Err(AbiError::TooManyArguments {
-                abi: plan.abi,
+            // Out of registers: the argument continues on the stack.
+            let location = add_stack(plan, 8, 8, false);
+            plan.args.push(ArgPlan {
                 index,
+                ty: ty.clone(),
+                passing: Passing::Direct {
+                    parts: vec![ValuePart {
+                        source_offset: 0,
+                        size,
+                        location,
+                    }],
+                },
             });
+            return Ok(());
         }
         let loc = Location::Register(RegisterId {
             class: RegisterClass::Fpr,
@@ -189,10 +207,19 @@ pub(crate) fn scalar_or_indirect(
         return Ok(());
     }
     if budget.gpr >= budget.max_gpr {
-        return Err(AbiError::TooManyArguments {
-            abi: plan.abi,
+        let location = add_stack(plan, size.max(8), 8, false);
+        plan.args.push(ArgPlan {
             index,
+            ty: ty.clone(),
+            passing: Passing::Direct {
+                parts: vec![ValuePart {
+                    source_offset: 0,
+                    size,
+                    location,
+                }],
+            },
         });
+        return Ok(());
     }
     let loc = Location::Register(RegisterId {
         class: RegisterClass::Gpr,
