@@ -34,6 +34,13 @@ impl DataLayout {
         stack_align: 16,
         endian: Endian::Little,
     };
+    /// 32-bit pointers and 32-bit `long`: RISC-V ILP32.
+    pub const ILP32: Self = Self {
+        pointer_bits: 32,
+        pointer_align: 4,
+        stack_align: 16,
+        endian: Endian::Little,
+    };
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -43,6 +50,7 @@ pub enum AbiKind {
     WindowsX64,
     Aapcs64,
     Riscv64,
+    Riscv32,
     LoongArch64,
 }
 
@@ -53,6 +61,7 @@ impl AbiKind {
     pub fn data_layout(self) -> DataLayout {
         match self {
             AbiKind::ShyV1 => DataLayout::SHY,
+            AbiKind::Riscv32 => DataLayout::ILP32,
             _ => DataLayout::LP64,
         }
     }

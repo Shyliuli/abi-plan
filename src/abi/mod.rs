@@ -11,6 +11,7 @@ pub fn plan(abi: AbiKind, signature: &FunctionSignature) -> Result<CallPlan, Abi
         AbiKind::WindowsX64 => common::windows_x64(signature),
         AbiKind::Aapcs64 => common::aapcs64(signature),
         AbiKind::Riscv64 => common::riscv64(signature),
+        AbiKind::Riscv32 => common::riscv32(signature),
         AbiKind::LoongArch64 => common::loongarch64(signature),
     }
 }

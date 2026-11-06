@@ -112,11 +112,15 @@ pub fn aapcs64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
 }
 
 pub fn riscv64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
-    riscv_like(AbiKind::Riscv64, sig)
+    riscv_like(AbiKind::Riscv64, sig, 8)
+}
+
+pub fn riscv32(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
+    riscv_like(AbiKind::Riscv32, sig, 4)
 }
 
 pub fn loongarch64(sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
-    riscv_like(AbiKind::LoongArch64, sig)
+    riscv_like(AbiKind::LoongArch64, sig, 8)
 }
 
 fn aggregate_register_abi(
@@ -421,13 +425,18 @@ fn arm_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError>
 /// classifying eightbytes: floating fields get their own FP register, integer
 /// fields share a register while they fit in one XLEN. An aggregate that does
 /// not fit is passed by reference.
-fn riscv_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiError> {
+///
+/// `xlen` is the integer register width in bytes: 8 for the 64-bit targets and
+/// 4 for RISC-V ILP32. A scalar wider than one XLEN (a 64-bit integer on rv32)
+/// travels in consecutive registers, low half first, or in a register plus a
+/// stack slot when only one register is left.
+fn riscv_like(abi: AbiKind, sig: &FunctionSignature, xlen: u32) -> Result<CallPlan, AbiError> {
     let mut plan = base(abi, sig);
     let mut gpr = 0u16;
     let mut fpr = 0u16;
 
     if sig.ret.is_aggregate() {
-        match aggregate_parts(&sig.ret) {
+        match aggregate_parts(&sig.ret, xlen) {
             Some(parts) if parts_fit(&parts, gpr, fpr, 2, 2) => {
                 let mut emitted = Vec::new();
                 for part in &parts {
@@ -467,12 +476,18 @@ fn riscv_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiErro
         } else {
             RegisterClass::Gpr
         };
-        direct_return(&mut plan, &sig.ret, class, 0);
+        let parts = scalar_register_parts(&sig.ret, class, 0, xlen);
+        for part in &parts {
+            if let Location::Register(register) = part.location {
+                add_register(&mut plan, register, None);
+            }
+        }
+        plan.return_value = ReturnPlan::Direct { parts };
     }
 
     for (index, ty) in sig.params.iter().enumerate() {
         if ty.is_aggregate() {
-            match aggregate_parts(ty) {
+            match aggregate_parts(ty, xlen) {
                 Some(parts) if parts_fit(&parts, gpr, fpr, 8, 8) => {
                     let mut emitted = Vec::new();
                     for part in &parts {
@@ -525,7 +540,7 @@ fn riscv_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiErro
                         gpr += 1;
                         location
                     } else {
-                        add_stack(&mut plan, pointer_size(abi), 8, false)
+                        add_stack(&mut plan, pointer_size(abi), xlen as u16, false)
                     };
                     plan.args.push(ArgPlan {
                         index,
@@ -541,19 +556,149 @@ fn riscv_like(abi: AbiKind, sig: &FunctionSignature) -> Result<CallPlan, AbiErro
             }
             continue;
         }
-        let mut budget = RegisterBudget {
-            gpr,
-            fpr,
-            max_gpr: 8,
-            max_fpr: 8,
-            indirect_threshold: 16,
-            byval_aggregates: false,
-        };
-        scalar_or_indirect(&mut plan, index, ty, &mut budget)?;
-        gpr = budget.gpr;
-        fpr = budget.fpr;
+        if ty.is_float() {
+            if fpr >= 8 {
+                let location = stack_scalar(&mut plan, ty, xlen);
+                plan.args.push(ArgPlan {
+                    index,
+                    ty: ty.clone(),
+                    passing: Passing::Direct {
+                        parts: vec![ValuePart {
+                            source_offset: 0,
+                            size: ty.size(),
+                            location,
+                        }],
+                    },
+                });
+                continue;
+            }
+            let parts = scalar_register_parts(ty, RegisterClass::Fpr, fpr, xlen);
+            add_register(
+                &mut plan,
+                RegisterId {
+                    class: RegisterClass::Fpr,
+                    index: fpr,
+                },
+                Some((index, 0, ty.size())),
+            );
+            fpr += 1;
+            plan.args.push(ArgPlan {
+                index,
+                ty: ty.clone(),
+                passing: Passing::Direct { parts },
+            });
+            continue;
+        }
+        let needed = ty.size().div_ceil(xlen).max(1) as u16;
+        if gpr + needed <= 8 {
+            let parts = scalar_register_parts(ty, RegisterClass::Gpr, gpr, xlen);
+            for part in &parts {
+                if let Location::Register(register) = part.location {
+                    add_register(
+                        &mut plan,
+                        register,
+                        Some((index, part.source_offset, part.size)),
+                    );
+                }
+            }
+            gpr += needed;
+            plan.args.push(ArgPlan {
+                index,
+                ty: ty.clone(),
+                passing: Passing::Direct { parts },
+            });
+        } else if needed == 2 && gpr < 8 {
+            // 2*XLEN value with exactly one register left: the low half goes
+            // in that register and the high half on the stack.
+            let low = ValuePart {
+                source_offset: 0,
+                size: xlen,
+                location: Location::Register(RegisterId {
+                    class: RegisterClass::Gpr,
+                    index: gpr,
+                }),
+            };
+            add_register(
+                &mut plan,
+                RegisterId {
+                    class: RegisterClass::Gpr,
+                    index: gpr,
+                },
+                Some((index, 0, xlen)),
+            );
+            let location = add_stack(&mut plan, xlen, xlen as u16, false);
+            plan.args.push(ArgPlan {
+                index,
+                ty: ty.clone(),
+                passing: Passing::Direct {
+                    parts: vec![
+                        low,
+                        ValuePart {
+                            source_offset: xlen,
+                            size: ty.size() - xlen,
+                            location,
+                        },
+                    ],
+                },
+            });
+            gpr = 8;
+        } else {
+            let location = stack_scalar(&mut plan, ty, xlen);
+            plan.args.push(ArgPlan {
+                index,
+                ty: ty.clone(),
+                passing: Passing::Direct {
+                    parts: vec![ValuePart {
+                        source_offset: 0,
+                        size: ty.size(),
+                        location,
+                    }],
+                },
+            });
+        }
     }
     Ok(plan)
+}
+
+/// One argument slot on the stack, aligned for its value class.
+fn stack_scalar(plan: &mut CallPlan, ty: &AbiType, xlen: u32) -> Location {
+    let align = (ty.align() as u32).max(xlen);
+    let bytes = align_up(ty.size().max(xlen), align);
+    add_stack(plan, bytes, align as u16, false)
+}
+
+/// A scalar's register pieces, low half first. An FP scalar always fits one
+/// register; an integer no wider than XLEN does too, and a 2*XLEN integer
+/// takes a pair.
+fn scalar_register_parts(
+    ty: &AbiType,
+    class: RegisterClass,
+    first: u16,
+    xlen: u32,
+) -> Vec<ValuePart> {
+    let size = ty.size();
+    let count = if class == RegisterClass::Fpr {
+        1
+    } else {
+        size.div_ceil(xlen).max(1)
+    };
+    (0..count)
+        .map(|n| {
+            let offset = n * xlen;
+            ValuePart {
+                source_offset: offset,
+                size: if class == RegisterClass::Fpr {
+                    size
+                } else {
+                    size.saturating_sub(offset).min(xlen)
+                },
+                location: Location::Register(RegisterId {
+                    class,
+                    index: first + n as u16,
+                }),
+            }
+        })
+        .collect()
 }
 
 fn pointer_size(abi: AbiKind) -> u32 {
@@ -581,14 +726,14 @@ fn parts_fit(parts: &[Part], gpr: u16, fpr: u16, max_gpr: u16, max_fpr: u16) -> 
 
 /// Flatten an aggregate into register pieces, or return `None` when it has to
 /// be passed by reference.
-fn aggregate_parts(ty: &AbiType) -> Option<Vec<Part>> {
-    if ty.size() > 16 {
+fn aggregate_parts(ty: &AbiType, xlen: u32) -> Option<Vec<Part>> {
+    if ty.size() > 2 * xlen {
         return None;
     }
     // A homogeneous aggregate of one floating type keeps one register per
     // element, which is exactly what the field walk below produces.
     let mut leaves = Vec::new();
-    collect_leaves(ty, 0, &mut leaves)?;
+    collect_leaves(ty, 0, xlen, &mut leaves)?;
     if leaves.is_empty() {
         return None;
     }
@@ -605,7 +750,7 @@ fn aggregate_parts(ty: &AbiType) -> Option<Vec<Part>> {
         }
         match &mut pending {
             Some(current)
-                if current.offset + current.size + leaf.size <= 8
+                if current.offset + current.size + leaf.size <= xlen
                     && leaf.offset == current.offset + current.size =>
             {
                 current.size += leaf.size;
@@ -621,29 +766,63 @@ fn aggregate_parts(ty: &AbiType) -> Option<Vec<Part>> {
     if let Some(pending) = pending {
         parts.push(pending);
     }
-    Some(parts)
+    Some(split_wide_parts(parts, xlen))
 }
 
-fn collect_leaves(ty: &AbiType, base: u32, out: &mut Vec<Part>) -> Option<()> {
+/// Split an integer part wider than one XLEN into one part per register.
+///
+/// A union is classified as one opaque integer piece, which can be 2*XLEN
+/// bytes wide on 64-bit targets and must still become one register per XLEN.
+fn split_wide_parts(parts: Vec<Part>, xlen: u32) -> Vec<Part> {
+    let mut split = Vec::new();
+    for part in parts {
+        if part.class == RegisterClass::Fpr || part.size <= xlen {
+            split.push(part);
+            continue;
+        }
+        let mut done = 0;
+        while done < part.size {
+            let size = (part.size - done).min(xlen);
+            split.push(Part {
+                offset: part.offset + done,
+                size,
+                class: RegisterClass::Gpr,
+            });
+            done += size;
+        }
+    }
+    split
+}
+
+fn collect_leaves(ty: &AbiType, base: u32, xlen: u32, out: &mut Vec<Part>) -> Option<()> {
     match ty {
         AbiType::Float { .. } => out.push(Part {
             offset: base,
             size: ty.size(),
             class: RegisterClass::Fpr,
         }),
-        AbiType::Integer { .. } | AbiType::Pointer { .. } | AbiType::Bool => out.push(Part {
-            offset: base,
-            size: ty.size(),
-            class: RegisterClass::Gpr,
-        }),
+        AbiType::Integer { .. } | AbiType::Pointer { .. } | AbiType::Bool => {
+            // A 64-bit integer leaf occupies a register pair on rv32.
+            let size = ty.size();
+            let mut done = 0;
+            while done < size {
+                let piece = (size - done).min(xlen);
+                out.push(Part {
+                    offset: base + done,
+                    size: piece,
+                    class: RegisterClass::Gpr,
+                });
+                done += piece;
+            }
+        }
         AbiType::Array { element, count } => {
             for index in 0..*count {
-                collect_leaves(element, base + index * element.size(), out)?;
+                collect_leaves(element, base + index * element.size(), xlen, out)?;
             }
         }
         AbiType::Struct { fields, .. } => {
             for field in fields {
-                collect_leaves(&field.ty, base + field.offset, out)?;
+                collect_leaves(&field.ty, base + field.offset, xlen, out)?;
             }
         }
         // A union cannot be flattened: its members overlap.
