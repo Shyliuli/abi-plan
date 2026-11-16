@@ -144,7 +144,7 @@ fn required<'a>(
 }
 
 fn parse_types(text: &str, source: &Path) -> Result<Vec<ArgType>, String> {
-    if text.is_empty() {
+    if text.is_empty() || text == "void" {
         return Ok(Vec::new());
     }
     text.split(',')
@@ -157,10 +157,10 @@ fn parse_type(text: &str, source: &Path) -> Result<ArgType, String> {
     if label.is_empty() {
         return Err(format!("{}: empty C type", source.display()));
     }
-    let ctype = if label == "int" {
-        CType::Int
-    } else {
-        CType::Unsupported
+    let ctype = match label.as_str() {
+        "int" => CType::Int,
+        "void" => CType::Void,
+        _ => CType::Unsupported,
     };
     Ok(ArgType { label, ctype })
 }
@@ -455,6 +455,11 @@ fn clang() -> String {
 fn gpr32(register: Register) -> Option<&'static str> {
     match register {
         Register::Rdi => Some("edi"),
+        Register::Rsi => Some("esi"),
+        Register::Rdx => Some("edx"),
+        Register::Rcx => Some("ecx"),
+        Register::R8 => Some("r8d"),
+        Register::R9 => Some("r9d"),
         Register::Rax => Some("eax"),
         Register::None => None,
     }
@@ -463,6 +468,11 @@ fn gpr32(register: Register) -> Option<&'static str> {
 fn gpr64(register: Register) -> Option<&'static str> {
     match register {
         Register::Rdi => Some("rdi"),
+        Register::Rsi => Some("rsi"),
+        Register::Rdx => Some("rdx"),
+        Register::Rcx => Some("rcx"),
+        Register::R8 => Some("r8"),
+        Register::R9 => Some("r9"),
         Register::Rax => Some("rax"),
         Register::None => None,
     }
