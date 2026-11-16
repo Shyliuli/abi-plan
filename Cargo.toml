@@ -6,4 +6,8 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "test-driver"
+path = "test/driver.rs"
+
 [dependencies]

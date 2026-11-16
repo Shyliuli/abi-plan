@@ -1,0 +1,2 @@
+[alias]
+run-test = "run --bin test-driver"
