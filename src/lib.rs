@@ -2,7 +2,7 @@ use core::slice;
 use std::ffi::c_int;
 
 #[repr(C)]
-enum AbiPlanError {
+pub enum AbiPlanError {
     Ok = 0,
     NotSupport = -1,
     InvalidArgument = -2,
@@ -10,7 +10,7 @@ enum AbiPlanError {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum CType {
+pub enum CType {
     // 增加Int128时，需要修改很多地方！
     Int,
     Unsupported,
@@ -19,7 +19,7 @@ enum CType {
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
-enum Register {
+pub enum Register {
     None,
     Rdi,
     Rsi,
@@ -31,9 +31,9 @@ enum Register {
 }
 
 #[repr(C)]
-struct Plan {
-    args: [Register; 6],
-    result: Register,
+pub struct Plan {
+    pub args: [Register; 6],
+    pub result: Register,
 }
 
 const X86_64_GPR_LEN: usize = 6;
@@ -87,7 +87,7 @@ fn do_plan(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
 
 /// # Safety
 /// plan 必须指向可写的 Plan。
-unsafe extern "C" fn get_plan(
+pub unsafe extern "C" fn get_plan(
     args: *const CType,
     len: c_int,
     result: CType,
