@@ -78,7 +78,7 @@ fn do_plan_simple(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
 }
 
 fn do_plan(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
-    if(is_simple_signature(args, result)){
+    if is_simple_signature(args, result){
     do_plan_simple(args, result)
     }else{
         return Err(AbiPlanError::NotSupport)
