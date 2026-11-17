@@ -87,6 +87,7 @@ fn do_plan(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
 
 /// # Safety
 /// plan 必须指向可写的 Plan。
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_plan(
     args: *const CType,
     len: c_int,
