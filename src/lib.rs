@@ -58,7 +58,7 @@ fn gen_simple_regs(count: usize) -> [Register; X86_64_GPR_LEN] {
 }
 // 检查是否是简单情况(gpr size以内，都是标量/指针)
 fn is_simple_signature(args: &[CType], result: CType) -> bool {
-    args.len() < X86_64_GPR_LEN
+    args.len() <= X86_64_GPR_LEN
     //后续还要加入指针等类型
         && (args.is_empty() || args.iter().all(|arg| matches!(arg, CType::Int)))
         && matches!(result, CType::Int | CType::Void)
