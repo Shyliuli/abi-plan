@@ -1,116 +1,77 @@
-use core::slice;
-use std::ffi::c_int;
+//! C ABI 边界：把 C 函数签名（`CFunc` 的 arg/ret）转换为 `CallPlan`。
+//!
+//! - `datastruct`：数据层，定义请求/结果类型与后端 trait。
+//! - `x86_64_sys`：x86_64 SysV 后端，只提供寄存器表。
+//! - `allocator`：共享分配器，按参数顺序生成 `Place`。
 
+use std::slice;
+
+mod allocator;
+mod datastruct;
+mod x86_64_sys;
+
+use datastruct::Backend;
+
+pub use datastruct::{Allocation, CFunc, CallPlan, CType, Place, Register};
+
+/// `get_plan` 的错误码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 pub enum AbiPlanError {
     Ok = 0,
-    NotSupport = -1,
-    InvalidArgument = -2,
-}
-
-#[derive(Clone, Copy)]
-#[repr(u8)]
-pub enum CType {
-    // 增加Int128时，需要修改很多地方！
-    Int,
-    Unsupported,
-    Void,
-}
-
-#[derive(Clone, Copy)]
-#[repr(u8)]
-pub enum Register {
-    None,
-    Rdi,
-    Rsi,
-    Rdx,
-    Rcx,
-    R8,
-    R9,
-    Rax,
-}
-
-#[repr(C)]
-pub struct Plan {
-    pub args: [Register; 6],
-    pub result: Register,
-}
-
-const X86_64_GPR_LEN: usize = 6;
-
-
-//生成简单情况寄存器列表
-fn gen_simple_regs(count: usize) -> [Register; X86_64_GPR_LEN] {
-    const ARG_REGISTERS: [Register; X86_64_GPR_LEN] = [
-        Register::Rdi,
-        Register::Rsi,
-        Register::Rdx,
-        Register::Rcx,
-        Register::R8,
-        Register::R9,
-    ];
-
-    let mut registers = [Register::None; X86_64_GPR_LEN];
-    for (register, argument_register) in registers.iter_mut().zip(ARG_REGISTERS).take(count) {
-        *register = argument_register;
-    }
-    registers
-}
-// 检查是否是简单情况(gpr size以内，都是标量/指针)
-fn is_simple_signature(args: &[CType], result: CType) -> bool {
-    args.len() <= X86_64_GPR_LEN
-    //后续还要加入指针等类型
-        && (args.is_empty() || args.iter().all(|arg| matches!(arg, CType::Int)))
-        && matches!(result, CType::Int | CType::Void)
-}
-
-fn do_plan_simple(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
-    debug_assert!(is_simple_signature(args, result));
-    let result = match result {
-        CType::Int => Register::Rax,
-        CType::Void => Register::None,
-        CType::Unsupported => return Err(AbiPlanError::NotSupport),
-    };
-    Ok(Plan {
-        args: gen_simple_regs(args.len()),
-        result,
-    })
-}
-
-fn do_plan(args: &[CType], result: CType) -> Result<Plan, AbiPlanError> {
-    if is_simple_signature(args, result){
-    do_plan_simple(args, result)
-    }else{
-        return Err(AbiPlanError::NotSupport)
-    }
+    Unsupported = 1,
+    InvalidArgument = 2,
 }
 
 /// # Safety
-/// plan 必须指向可写的 Plan。
+/// `cfunc.args` 在 `args_len > 0` 时必须指向 `args_len` 个已初始化的 `CType`；
+/// `out` 必须指向可写的 `CallPlan`。
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn get_plan(
-    args: *const CType,
-    len: c_int,
-    result: CType,
-    plan: *mut Plan,
-) -> AbiPlanError {
-    if len < 0 || plan.is_null() || (len > 0 && args.is_null()) {
+pub unsafe extern "C" fn get_plan(cfunc: CFunc, out: *mut CallPlan) -> AbiPlanError {
+    if out.is_null() || (cfunc.args_len > 0 && cfunc.args.is_null()) {
         return AbiPlanError::InvalidArgument;
     }
-    // 传入空args视作fn(void)
-    let args = if len == 0 {
+
+    // args
+    let args = if cfunc.args_len == 0 {
         &[]
     } else {
-        // SAFETY: 已检查len大于0且args非空
-        unsafe { slice::from_raw_parts(args, len as usize) }
+        unsafe { slice::from_raw_parts(cfunc.args, cfunc.args_len as usize) }
     };
 
-    match do_plan(args, result) {
-        Ok(p) => {
-            // SAFETY: plan已检查非NULL，由调用方确保有效
-            unsafe { plan.write(p) };
-            AbiPlanError::Ok
+    // Todo: 支持结构体
+    // 在这里初始化
+    let mut layouts = Vec::with_capacity(args.len());
+    
+    for ctype in args {
+        //跳过void
+        if matches!(ctype, CType::Void) {
+            continue;
         }
-        Err(e) => e,
+        // CType->Layout
+        match datastruct::Layout::from_ctype(ctype) {
+            Some(layout) => layouts.push(layout),
+            None => return AbiPlanError::Unsupported,
+        }
     }
+    
+    // 返回值
+    let Some(ret) = datastruct::Layout::from_ctype(&cfunc.ret) else {
+        return AbiPlanError::Unsupported;
+    };
+
+    // 生成plan
+    let plan = x86_64_sys::X86_64SysBackend::gen_plan(&layouts, ret);
+    
+    // SAFETY: `out` 已检查非空。
+    unsafe { out.write(plan) };
+    AbiPlanError::Ok
+}
+
+/// # Safety
+/// `plan` 必须由 `get_plan` 返回且只释放一次；释放后不得再访问。
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_plan(plan: CallPlan) {
+    // SAFETY: 见函数文档。
+    unsafe { plan.free() };
 }
