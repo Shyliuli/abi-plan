@@ -141,6 +141,7 @@ impl Layout {
             CType::Void => (0, 1, CTypeKind::Void),
             CType::Int { len, .. } if matches!(len, 1 | 2 | 4 | 8 | 16) => (len, len, CTypeKind::Int),
             CType::Float { len } if matches!(len, 4 | 8 | 16) => (len, len, CTypeKind::Float),
+            // TODO: Struct/Array/Union 还没实现
             _ => return None,
         };
         Some(Self { size, align, offset: Vec::new(), sub_layout: Vec::new(), kind })
