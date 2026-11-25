@@ -1,6 +1,7 @@
 use core::{ffi::c_void, slice};
 
 // 指针:使用malloc
+/// cbindgen:ignore
 unsafe extern "C" {
     unsafe  fn malloc(size: usize) -> *mut c_void;
     unsafe  fn free(ptr: *mut c_void);
@@ -24,7 +25,7 @@ pub struct CFunc {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[repr(C)]
+#[repr(C,u32)]
 /// C 类型。
 ///
 /// 指针类型用 `Int { len: 8, .. }` 表示；`Void` 用于返回值声明，
@@ -196,7 +197,7 @@ impl From<CType> for Layout {
                         sub_layout.push(layout);
                     }
                     Layout { size: align_up(max_size,max_align)
-                    ,align: max_align, offset: vec![0], sub_layout, kind: CTypeKind::Union}
+                    ,align: max_align, offset: vec![], sub_layout, kind: CTypeKind::Union}
                 }
             }
     }
@@ -214,6 +215,17 @@ impl Backend for X86_64SysvBackend{
     fn gen_plan(f:CFunc)->CallPlan{
         // 1. ret
         let ret = Layout::from(f.ret);
+        println!("ret: {:?}",ret);
+        // 2. args
+        let args=if f.args_len == 0 {
+            &[]
+        }else{
+            unsafe{slice::from_raw_parts(f.args,f.args_len as usize)}
+        };
+        for (i,arg) in args.iter().enumerate(){
+            println!("arg {}: {:?}",i,Layout::from(*arg));
+        }
         todo!("impl gen_plan for x86_64 backend");
     }
 }
+
