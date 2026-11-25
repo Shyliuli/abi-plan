@@ -39,14 +39,21 @@ pub unsafe extern "C" fn get_plan(cfunc: CFunc, out: *mut CallPlan) -> AbiPlanEr
         unsafe { slice::from_raw_parts(cfunc.args, cfunc.args_len as usize) }
     };
 
+    // `(void)` 形式的无参声明等同于 `()`；其余情况下出现 Void 参数会让
+    // `plan.args()[i]` 与调用方的 `val[i]` 错位，直接拒绝。
+    let params: &[CType] = if args.len() == 1 && matches!(args[0], CType::Void) {
+        &[]
+    } else {
+        args
+    };
+
     // Todo: 支持结构体
     // 在这里初始化
-    let mut layouts = Vec::with_capacity(args.len());
-    
-    for ctype in args {
-        //跳过void
+    let mut layouts = Vec::with_capacity(params.len());
+
+    for ctype in params {
         if matches!(ctype, CType::Void) {
-            continue;
+            return AbiPlanError::InvalidArgument;
         }
         // CType->Layout
         match datastruct::Layout::from_ctype(ctype) {
