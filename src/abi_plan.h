@@ -6,7 +6,11 @@
 /**
  * 寄存器，后续可扩展为按 ABI 返回不同的寄存器。
  */
-typedef enum Register {
+enum Register
+#if __STDC_VERSION__ >= 202311L
+  : uint32_t
+#endif // __STDC_VERSION__ >= 202311L
+ {
   Register_Rax,
   Register_Rcx,
   Register_Rdx,
@@ -25,52 +29,12 @@ typedef enum Register {
   Register_Xmm5,
   Register_Xmm6,
   Register_Xmm7,
-} Register;
-
-/**
- * 分配方式：寄存器、栈或 sret。
- */
-typedef enum Allocation_Tag {
-  Allocation_Void,
-  Allocation_Reg,
-  Allocation_Stack,
-  Allocation_Sret,
-} Allocation_Tag;
-
-typedef struct Allocation_Reg_Body {
-  enum Register *reg;
-  uintptr_t len;
-} Allocation_Reg_Body;
-
-typedef struct Allocation_Stack_Body {
-  uintptr_t offset;
-} Allocation_Stack_Body;
-
-typedef struct Allocation {
-  Allocation_Tag tag;
-  union {
-    Allocation_Reg_Body reg;
-    Allocation_Stack_Body stack;
-  };
-} Allocation;
-
-typedef struct Place {
-  uintptr_t size;
-  uintptr_t align;
-  struct Allocation alloc;
-} Place;
-
-/**
- * 调用计划，作为 abi_plan 库的计算结果，指导外部程序进行 ABI lowering。
- *
- * `args` 与各 Reg 数组由 malloc 分配，用完后通过 `free_plan` 释放。
- */
-typedef struct CallPlan {
-  struct Place ret;
-  struct Place *args;
-  uintptr_t args_len;
-  uintptr_t stack_size;
-} CallPlan;
+};
+#if __STDC_VERSION__ >= 202311L
+typedef enum Register Register;
+#else
+typedef uint32_t Register;
+#endif // __STDC_VERSION__ >= 202311L
 
 /**
  * C 类型。
@@ -98,7 +62,6 @@ typedef uint32_t CType_Tag;
 
 typedef struct CType_Int_Body {
   uintptr_t len;
-  bool is_signed;
 } CType_Int_Body;
 
 typedef struct CType_Float_Body {
@@ -143,4 +106,51 @@ typedef struct CFunc {
   struct CType ret;
 } CFunc;
 
-struct CallPlan abi_plan_gen(struct CFunc f);
+/**
+ * 分配方式：寄存器、栈或 sret。
+ */
+typedef enum Allocation_Tag {
+  Allocation_Void,
+  Allocation_Reg,
+  Allocation_Stack,
+  Allocation_Sret,
+} Allocation_Tag;
+
+typedef struct Allocation_Reg_Body {
+  Register regs[2];
+  uint8_t len;
+} Allocation_Reg_Body;
+
+typedef struct Allocation_Stack_Body {
+  uintptr_t offset;
+} Allocation_Stack_Body;
+
+typedef struct Allocation {
+  Allocation_Tag tag;
+  union {
+    Allocation_Reg_Body reg;
+    Allocation_Stack_Body stack;
+  };
+} Allocation;
+
+typedef struct Place {
+  uintptr_t size;
+  uintptr_t align;
+  struct Allocation alloc;
+} Place;
+
+/**
+ * 调用计划，作为 abi_plan 库的计算结果，指导外部程序进行 ABI lowering。
+ *
+ * `args` 由 malloc 分配，用完后通过 `free_plan` 释放。
+ */
+typedef struct CallPlan {
+  struct Place ret;
+  struct Place *args;
+  uintptr_t args_len;
+  uintptr_t stack_size;
+} CallPlan;
+
+const char *abi_plan_error(void);
+
+int32_t abi_plan_gen(struct CFunc f, struct CallPlan *p);
