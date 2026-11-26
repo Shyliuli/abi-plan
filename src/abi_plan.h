@@ -6,11 +6,7 @@
 /**
  * 寄存器，后续可扩展为按 ABI 返回不同的寄存器。
  */
-enum Register
-#if __STDC_VERSION__ >= 202311L
-  : uint32_t
-#endif // __STDC_VERSION__ >= 202311L
- {
+typedef enum Register {
   Register_Rax,
   Register_Rcx,
   Register_Rdx,
@@ -29,12 +25,7 @@ enum Register
   Register_Xmm5,
   Register_Xmm6,
   Register_Xmm7,
-};
-#if __STDC_VERSION__ >= 202311L
-typedef enum Register Register;
-#else
-typedef uint32_t Register;
-#endif // __STDC_VERSION__ >= 202311L
+} Register;
 
 /**
  * C 类型。
@@ -117,7 +108,7 @@ typedef enum Allocation_Tag {
 } Allocation_Tag;
 
 typedef struct Allocation_Reg_Body {
-  Register regs[2];
+  enum Register regs[2];
   uint8_t len;
 } Allocation_Reg_Body;
 

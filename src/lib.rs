@@ -3,9 +3,10 @@ use core::ffi::c_char;
 use std::io::Write;
 
 mod datastruct;
+mod x86_64_sysv;
 
 pub use datastruct::{Allocation, CFunc, CallPlan, CType, Place, Register};
-use datastruct::X86_64SysvBackend;
+use x86_64_sysv::X86_64SysvBackend;
 
 use crate::datastruct::Backend;
 
